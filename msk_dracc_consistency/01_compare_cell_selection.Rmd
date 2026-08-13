@@ -1,0 +1,955 @@
+---
+title: "MSK and DRACC Cell-Selection Consistency"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This report follows the cumulative cell-selection workflow in order:
+initial called cells, singlets, transcriptome QC, and geneBC/LARRY eligibility.
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(ggplot2)
+
+output_dir = "/fh/fast/sun_w/yub/github/MSK_30polyKO/msk_dracc_consistency/outputs/01_compare_cell_selection"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+msk_dir = "/fh/fast/sun_w/yub/github/MSK_30polyKO/external_sources/msk/30KO_scRNAseq"
+dracc_dir = "/fh/fast/sun_w/yub/github/MSK_30polyKO/dracc_qc/outputs/01_extract_raw_count_cell_meta"
+
+stage_map = data.frame(
+  stage = c(
+    "ES", "DE", "DE_GemX", "PP1", "PP2",
+    "S5_1", "S5_2", "S6_1", "S6_2"
+  ),
+  msk_source = c(
+    "ES", "DE_XM", "DE_NZ", "PP1", "PP2",
+    "S5_1", "S5_2", "S6_1", "S6_2"
+  ),
+  dracc_source = c(
+    "ES", "DE", "DE_XM", "PP1", "PP2",
+    "S5_1", "S5_2", "S6_1", "S6_2"
+  ),
+  stringsAsFactors = FALSE
+)
+feature_suffix = c(
+  ES = "es",
+  DE = "de",
+  DE_XM = "de_gemx",
+  PP1 = "pp1",
+  PP2 = "pp2",
+  S5_1 = "s5_1",
+  S5_2 = "s5_2",
+  S6_1 = "s6_1",
+  S6_2 = "s6_2"
+)
+```
+
+## Stage Mapping
+
+The final stage labels align corresponding MSK and DRACC samples. The two DE
+sources require explicit mapping; the remaining stages map directly.
+
+```{r stage-mapping}
+knitr::kable(stage_map, row.names = FALSE)
+```
+
+## Initial Called Cells
+
+MSK initial cells are the cells present in its per-stage transcriptome
+metadata. DRACC initial cells require `is_cell == TRUE`. Comparisons use the
+16-base 10x barcode within each mapped stage.
+
+```{r initial-called-cells}
+# Compare two cell-barcode sets at one cumulative workflow step.
+compare_sets <- function(stage, msk_cells, dracc_cells) {
+  shared_cells = intersect(msk_cells, dracc_cells)
+
+  data.frame(
+    stage = stage,
+    n_msk = length(msk_cells),
+    n_dracc = length(dracc_cells),
+    n_shared = length(shared_cells),
+    shared_over_msk = 100 * length(shared_cells) / length(msk_cells),
+    shared_over_dracc = 100 * length(shared_cells) / length(dracc_cells),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Add the overall row to one stage-level cell-set table.
+add_overall <- function(x) {
+  rbind(
+    x,
+    data.frame(
+      stage = "All",
+      n_msk = sum(x$n_msk),
+      n_dracc = sum(x$n_dracc),
+      n_shared = sum(x$n_shared),
+      shared_over_msk = 100 * sum(x$n_shared) / sum(x$n_msk),
+      shared_over_dracc = 100 * sum(x$n_shared) / sum(x$n_dracc),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+# Load the called-cell metadata needed by later cumulative steps.
+load_stage <- function(i) {
+  map = stage_map[i, , drop = FALSE]
+  msk_path = file.path(
+    msk_dir,
+    "3.TX_QC",
+    paste0("df.", map$msk_source, ".seu.QC.metadata.rds")
+  )
+  msk_bc_path = file.path(
+    msk_dir,
+    "2.demulti_BC",
+    paste0("df.all.larryBC.geneBC.", map$msk_source, ".rds")
+  )
+  dracc_path = file.path(
+    dracc_dir,
+    paste0(map$dracc_source, ".rds")
+  )
+
+  stopifnot(
+    file.exists(msk_path),
+    file.exists(msk_bc_path),
+    file.exists(dracc_path)
+  )
+
+  msk = as.data.frame(readRDS(msk_path), stringsAsFactors = FALSE)
+  msk_bc = as.data.frame(readRDS(msk_bc_path), stringsAsFactors = FALSE)
+  dracc = as.data.frame(readRDS(dracc_path), stringsAsFactors = FALSE)
+  stopifnot(
+    all(c(
+      "scDblFinder.class",
+      "scDblFinder.score",
+      "nCount_RNA",
+      "nFeature_RNA",
+      "percent_mito"
+    ) %in% colnames(msk)),
+    all(c(
+      "cellid",
+      "geneBC",
+      "geneBCCategory",
+      "larryBC",
+      "larryBCCategory",
+      "larryBC_type"
+    ) %in% colnames(msk_bc)),
+    all(c(
+      "is_cell",
+      "dracc_barcode",
+      "singlet",
+      "doublet",
+      "doublet_scores",
+      "total_counts",
+      "n_genes",
+      "mt_pct"
+    ) %in% colnames(dracc))
+  )
+
+  msk$barcode = substr(rownames(msk), 1, 16)
+  msk_bc$barcode = substr(as.character(msk_bc$cellid), 1, 16)
+  stopifnot(is.logical(dracc$is_cell), !anyNA(dracc$is_cell))
+  dracc = dracc[dracc$is_cell, , drop = FALSE]
+
+  stopifnot(
+    !anyNA(msk$barcode),
+    !anyNA(msk_bc$barcode),
+    !anyNA(dracc$dracc_barcode),
+    !anyDuplicated(msk$barcode),
+    !anyDuplicated(msk_bc$barcode),
+    !anyDuplicated(dracc$dracc_barcode)
+  )
+
+  suffix = feature_suffix[[map$dracc_source]]
+  guide_prefix = paste0("CRISPR_Guide_Capture_grna_", suffix)
+  larry_prefix = paste0("Custom_larry_", suffix)
+  guide_fields = c(
+    "__num_umis",
+    "__feature_call",
+    "__feature1_count",
+    "__feature2_count"
+  )
+  larry_fields = c(
+    "__feature_call",
+    "__feature1_count",
+    "__feature2_count"
+  )
+  stopifnot(
+    all(paste0(guide_prefix, guide_fields) %in% colnames(dracc)),
+    all(paste0(larry_prefix, larry_fields) %in% colnames(dracc))
+  )
+
+  list(
+    stage = map$stage,
+    msk = msk,
+    msk_bc = msk_bc,
+    dracc = dracc,
+    guide_prefix = guide_prefix,
+    larry_prefix = larry_prefix
+  )
+}
+
+stage_data = lapply(seq_len(nrow(stage_map)), load_stage)
+
+initial_table = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    compare_sets(
+      x$stage,
+      x$msk$barcode,
+      as.character(x$dracc$dracc_barcode)
+    )
+  })
+)
+initial_table = add_overall(initial_table)
+
+write.csv(
+  initial_table,
+  file.path(output_dir, "initial_called_cells.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  initial_table,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 0, 2, 2),
+  col.names = c(
+    "Stage", "MSK", "DRACC", "Shared",
+    "Shared/MSK (%)", "Shared/DRACC (%)"
+  )
+)
+```
+
+## Singlets
+
+Each pipeline's own doublet classification is applied to its initial called
+cells. Raw scores are compared only for common initial cells because their
+numerical scales are pipeline-specific.
+
+```{r singlet-cells}
+stage_data = lapply(stage_data, function(x) {
+  x$msk$pass_singlet = (
+    !is.na(x$msk$scDblFinder.class) &
+      x$msk$scDblFinder.class == "singlet"
+  )
+  stopifnot(is.logical(x$dracc$singlet), !anyNA(x$dracc$singlet))
+  x$dracc$pass_singlet = x$dracc$singlet
+  x
+})
+
+singlet_table = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    compare_sets(
+      x$stage,
+      x$msk$barcode[x$msk$pass_singlet],
+      as.character(x$dracc$dracc_barcode[x$dracc$pass_singlet])
+    )
+  })
+)
+singlet_table = add_overall(singlet_table)
+
+write.csv(
+  singlet_table,
+  file.path(output_dir, "singlet_cells.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  singlet_table,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 0, 2, 2),
+  col.names = c(
+    "Stage", "MSK", "DRACC", "Shared",
+    "Shared/MSK (%)", "Shared/DRACC (%)"
+  )
+)
+```
+
+### Doublet Diagnostics
+
+The call table distinguishes matched singlets, matched doublets, and the two
+directions of disagreement. Doublet-overlap enrichment compares the observed
+number called doublet by both pipelines with the overlap expected from their
+two marginal doublet rates. Stage tests use one-sided hypergeometric p-values
+with BH adjustment across the nine stages.
+
+```{r doublet-diagnostics, fig.width=8, fig.height=7}
+# Align doublet scores and calls for common initial cells.
+doublet_data = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    common_cells = intersect(
+      x$msk$barcode,
+      as.character(x$dracc$dracc_barcode)
+    )
+    msk_index = match(common_cells, x$msk$barcode)
+    dracc_index = match(common_cells, x$dracc$dracc_barcode)
+
+    data.frame(
+      stage = x$stage,
+      barcode = common_cells,
+      msk_score = as.numeric(x$msk$scDblFinder.score[msk_index]),
+      dracc_score = as.numeric(x$dracc$doublet_scores[dracc_index]),
+      msk_call = as.character(x$msk$scDblFinder.class[msk_index]),
+      dracc_call = ifelse(
+        as.logical(x$dracc$doublet[dracc_index]),
+        "doublet",
+        ifelse(
+          as.logical(x$dracc$singlet[dracc_index]),
+          "singlet",
+          NA_character_
+        )
+      ),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+doublet_data = doublet_data[complete.cases(doublet_data), , drop = FALSE]
+stopifnot(
+  all(doublet_data$msk_call %in% c("singlet", "doublet")),
+  all(doublet_data$dracc_call %in% c("singlet", "doublet"))
+)
+
+# Summarize paired score and call agreement for one stage or all stages.
+summarize_doublets <- function(x, stage) {
+  data.frame(
+    stage = stage,
+    n_common = nrow(x),
+    both_singlet = sum(
+      x$msk_call == "singlet" & x$dracc_call == "singlet"
+    ),
+    both_doublet = sum(
+      x$msk_call == "doublet" & x$dracc_call == "doublet"
+    ),
+    msk_doublet_dracc_singlet = sum(
+      x$msk_call == "doublet" & x$dracc_call == "singlet"
+    ),
+    msk_singlet_dracc_doublet = sum(
+      x$msk_call == "singlet" & x$dracc_call == "doublet"
+    ),
+    agreement = 100 * mean(x$msk_call == x$dracc_call),
+    score_spearman = cor(x$msk_score, x$dracc_score, method = "spearman"),
+    stringsAsFactors = FALSE
+  )
+}
+
+doublet_call_table = do.call(
+  rbind,
+  c(
+    lapply(stage_map$stage, function(stage) {
+      summarize_doublets(
+        doublet_data[doublet_data$stage == stage, , drop = FALSE],
+        stage
+      )
+    }),
+    list(summarize_doublets(doublet_data, "All"))
+  )
+)
+
+write.csv(
+  doublet_call_table,
+  file.path(output_dir, "doublet_call_agreement.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  doublet_call_table,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 0, 0, 0, 2, 3),
+  col.names = c(
+    "Stage", "Common", "Both singlet", "Both doublet",
+    "MSK doublet / DRACC singlet",
+    "MSK singlet / DRACC doublet",
+    "Agreement (%)", "Score Spearman"
+  )
+)
+
+doublet_data$stage = factor(doublet_data$stage, levels = stage_map$stage)
+doublet_score_plot = ggplot(
+  doublet_data,
+  aes(x = msk_score, y = dracc_score)
+) +
+  geom_point(alpha = 0.08, size = 0.25, color = "#333333") +
+  facet_wrap(~stage, ncol = 3) +
+  labs(
+    x = "MSK raw doublet score",
+    y = "DRACC raw doublet score"
+  ) +
+  theme_classic(base_size = 10)
+
+doublet_score_path = file.path(output_dir, "doublet_scores.png")
+ggsave(
+  doublet_score_path,
+  doublet_score_plot,
+  width = 8,
+  height = 7,
+  dpi = 300
+)
+knitr::include_graphics(doublet_score_path)
+
+# Adjust hypergeometric p-values in log space to avoid numerical underflow.
+adjust_log_p <- function(log_p) {
+  order_p = order(log_p)
+  adjusted_sorted = log_p[order_p] +
+    log(length(log_p) / seq_along(log_p))
+  adjusted_sorted = rev(cummin(rev(adjusted_sorted)))
+  adjusted = numeric(length(log_p))
+  adjusted[order_p] = pmin(adjusted_sorted, 0)
+  adjusted
+}
+
+doublet_enrichment = do.call(
+  rbind,
+  lapply(stage_map$stage, function(stage) {
+    x = doublet_data[doublet_data$stage == stage, , drop = FALSE]
+    n_cells = nrow(x)
+    n_msk_doublet = sum(x$msk_call == "doublet")
+    n_dracc_doublet = sum(x$dracc_call == "doublet")
+    observed = sum(
+      x$msk_call == "doublet" & x$dracc_call == "doublet"
+    )
+    expected = n_msk_doublet * n_dracc_doublet / n_cells
+
+    data.frame(
+      stage = stage,
+      observed_doublet_overlap = observed,
+      expected_doublet_overlap = expected,
+      enrichment = observed / expected,
+      log_p = phyper(
+        observed - 1,
+        n_msk_doublet,
+        n_cells - n_msk_doublet,
+        n_dracc_doublet,
+        lower.tail = FALSE,
+        log.p = TRUE
+      ),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+doublet_enrichment$log_adjusted_p = adjust_log_p(
+  doublet_enrichment$log_p
+)
+doublet_enrichment$log10_adjusted_p = (
+  doublet_enrichment$log_adjusted_p / log(10)
+)
+doublet_enrichment$log_p = NULL
+doublet_enrichment$log_adjusted_p = NULL
+
+write.csv(
+  doublet_enrichment,
+  file.path(output_dir, "doublet_overlap_enrichment.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  doublet_enrichment,
+  row.names = FALSE,
+  digits = c(NA, 0, 1, 3, 1),
+  col.names = c(
+    "Stage", "Observed", "Expected", "Enrichment",
+    "log10(BH-adjusted p)"
+  )
+)
+```
+
+## Transcriptome QC
+
+The transcriptome-QC rules are applied cumulatively to each pipeline's
+singlets: total RNA counts at least 200, detected genes at least 100, and
+mitochondrial percentage at most 20%. DRACC uses the same thresholds as MSK.
+
+```{r transcriptome-qc-cells}
+stage_data = lapply(stage_data, function(x) {
+  x$msk$pass_transcriptome_qc = (
+    x$msk$pass_singlet &
+      !is.na(x$msk$nCount_RNA) &
+      x$msk$nCount_RNA >= 200 &
+      !is.na(x$msk$nFeature_RNA) &
+      x$msk$nFeature_RNA >= 100 &
+      !is.na(x$msk$percent_mito) &
+      x$msk$percent_mito <= 20
+  )
+  x$dracc$pass_transcriptome_qc = (
+    x$dracc$pass_singlet &
+      !is.na(x$dracc$total_counts) &
+      x$dracc$total_counts >= 200 &
+      !is.na(x$dracc$n_genes) &
+      x$dracc$n_genes >= 100 &
+      !is.na(x$dracc$mt_pct) &
+      x$dracc$mt_pct <= 20
+  )
+  x
+})
+
+transcriptome_qc_table = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    compare_sets(
+      x$stage,
+      x$msk$barcode[x$msk$pass_transcriptome_qc],
+      as.character(
+        x$dracc$dracc_barcode[x$dracc$pass_transcriptome_qc]
+      )
+    )
+  })
+)
+transcriptome_qc_table = add_overall(transcriptome_qc_table)
+
+write.csv(
+  transcriptome_qc_table,
+  file.path(output_dir, "transcriptome_qc_cells.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  transcriptome_qc_table,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 0, 2, 2),
+  col.names = c(
+    "Stage", "MSK", "DRACC", "Shared",
+    "Shared/MSK (%)", "Shared/DRACC (%)"
+  )
+)
+```
+
+### Transcriptome-QC Diagnostics
+
+The plots compare the raw QC values for cells called singlet by both
+pipelines. The diagonal marks equal values; dashed lines mark the applied
+thresholds.
+
+```{r transcriptome-qc-diagnostics, fig.width=10, fig.height=3.5}
+# Align transcriptome-QC values for shared singlets.
+paired_qc = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    shared_singlets = intersect(
+      x$msk$barcode[x$msk$pass_singlet],
+      as.character(x$dracc$dracc_barcode[x$dracc$pass_singlet])
+    )
+    msk_index = match(shared_singlets, x$msk$barcode)
+    dracc_index = match(shared_singlets, x$dracc$dracc_barcode)
+
+    data.frame(
+      stage = x$stage,
+      barcode = shared_singlets,
+      msk_counts = as.numeric(x$msk$nCount_RNA[msk_index]),
+      dracc_counts = as.numeric(x$dracc$total_counts[dracc_index]),
+      msk_genes = as.numeric(x$msk$nFeature_RNA[msk_index]),
+      dracc_genes = as.numeric(x$dracc$n_genes[dracc_index]),
+      msk_mito = as.numeric(x$msk$percent_mito[msk_index]),
+      dracc_mito = as.numeric(x$dracc$mt_pct[dracc_index]),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+metric_levels = c(
+  "Total RNA counts",
+  "Detected genes",
+  "Mitochondrial percentage"
+)
+qc_plot_data = rbind(
+  data.frame(
+    metric = metric_levels[[1]],
+    msk_value = paired_qc$msk_counts,
+    dracc_value = paired_qc$dracc_counts
+  ),
+  data.frame(
+    metric = metric_levels[[2]],
+    msk_value = paired_qc$msk_genes,
+    dracc_value = paired_qc$dracc_genes
+  ),
+  data.frame(
+    metric = metric_levels[[3]],
+    msk_value = paired_qc$msk_mito,
+    dracc_value = paired_qc$dracc_mito
+  )
+)
+qc_plot_data = qc_plot_data[
+  complete.cases(qc_plot_data),
+  ,
+  drop = FALSE
+]
+qc_plot_data$metric = factor(qc_plot_data$metric, levels = metric_levels)
+
+qc_thresholds = data.frame(
+  metric = factor(metric_levels, levels = metric_levels),
+  threshold = c(200, 100, 20)
+)
+
+transcriptome_qc_plot = ggplot(
+  qc_plot_data,
+  aes(x = msk_value, y = dracc_value)
+) +
+  geom_point(alpha = 0.08, size = 0.25, color = "#333333") +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linewidth = 0.4,
+    color = "#0072B2"
+  ) +
+  geom_vline(
+    data = qc_thresholds,
+    aes(xintercept = threshold),
+    linewidth = 0.4,
+    linetype = 2,
+    color = "#D55E00"
+  ) +
+  geom_hline(
+    data = qc_thresholds,
+    aes(yintercept = threshold),
+    linewidth = 0.4,
+    linetype = 2,
+    color = "#D55E00"
+  ) +
+  facet_wrap(~metric, scales = "free", nrow = 1) +
+  labs(
+    x = "MSK",
+    y = "DRACC"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(strip.background = element_blank())
+
+transcriptome_qc_plot_path = file.path(
+  output_dir,
+  "transcriptome_qc_metrics.png"
+)
+ggsave(
+  transcriptome_qc_plot_path,
+  transcriptome_qc_plot,
+  width = 10,
+  height = 3.5,
+  dpi = 300
+)
+knitr::include_graphics(transcriptome_qc_plot_path)
+```
+
+## geneBC and LARRY Eligibility
+
+This final selection is cumulative: only transcriptome-QC-qualified cells can
+pass. The same rule is applied to both workflows:
+
+- KO: geneBC Type 1, LARRY Type 1, and LARRY is assigned and not WT.
+- WT: geneBC Type 3, LARRY Type 1, and LARRY is WT.
+
+Type 1 requires a top feature count of at least 5 and a second/top ratio no
+greater than 0.5. Type 3 requires a top feature count below 5. This excludes
+Type-2 calls, weak or unassigned LARRY calls, and the conflicting combination
+of Type-1 geneBC with a WT LARRY barcode.
+
+```{r feature-eligible-cells}
+type_1 = "Type 1: Max >=5 & 2nd/Max <= 0.5"
+type_3 = "Type 3: Max < 5"
+
+stage_data = lapply(stage_data, function(x) {
+  # Align supplied MSK feature assignments to its transcriptome cells.
+  msk_bc_index = match(x$msk$barcode, x$msk_bc$barcode)
+  msk_gene_call = as.character(x$msk_bc$geneBC[msk_bc_index])
+  msk_gene_category = as.character(
+    x$msk_bc$geneBCCategory[msk_bc_index]
+  )
+  msk_larry_call = as.character(x$msk_bc$larryBC[msk_bc_index])
+  msk_larry_category = as.character(
+    x$msk_bc$larryBCCategory[msk_bc_index]
+  )
+  msk_larry_type = as.character(x$msk_bc$larryBC_type[msk_bc_index])
+
+  msk_is_ko = (
+    msk_gene_category == type_1 &
+      msk_larry_category == type_1 &
+      msk_larry_type != "WT"
+  )
+  msk_is_wt = (
+    msk_gene_category == type_3 &
+      msk_larry_category == type_1 &
+      msk_larry_type == "WT"
+  )
+  msk_is_ko[is.na(msk_is_ko)] = FALSE
+  msk_is_wt[is.na(msk_is_wt)] = FALSE
+
+  x$msk$pass_feature_eligibility = (
+    x$msk$pass_transcriptome_qc &
+      (msk_is_ko | msk_is_wt)
+  )
+  stopifnot(all(grepl("\\.[0-9]+$", msk_gene_call[msk_is_ko])))
+  x$msk$genotype_label = rep(NA_character_, nrow(x$msk))
+  x$msk$genotype_label[msk_is_ko] = sub(
+    "\\.[0-9]+$",
+    "",
+    msk_gene_call[msk_is_ko]
+  )
+  x$msk$genotype_label[msk_is_wt] = "WT"
+
+  # MSK wraps each WT LARRY ID with its paired WTBC alias.
+  x$msk$clone_id = msk_larry_call
+  msk_wt_clone = !is.na(msk_larry_type) & msk_larry_type == "WT"
+  stopifnot(all(grepl(
+    "^WTBC[0-9]+_BC[0-9]+$",
+    x$msk$clone_id[msk_wt_clone]
+  )))
+  x$msk$clone_id[msk_wt_clone] = sub(
+    "^WTBC[0-9]+_",
+    "",
+    x$msk$clone_id[msk_wt_clone]
+  )
+
+  wt_larry_labels = sort(unique(as.character(
+    x$msk_bc$larryBC[x$msk_bc$larryBC_type == "WT"]
+  )))
+  stopifnot(
+    length(wt_larry_labels) == 12L,
+    all(grepl("^WTBC[0-9]+_BC[0-9]+$", wt_larry_labels))
+  )
+  wt_larry_barcodes = sub("^WTBC[0-9]+_", "", wt_larry_labels)
+  stopifnot(
+    !anyDuplicated(wt_larry_barcodes),
+    !any(x$msk_bc$larryBC %in% wt_larry_barcodes)
+  )
+
+  guide_total = x$dracc[[paste0(x$guide_prefix, "__num_umis")]]
+  guide_top = x$dracc[[paste0(x$guide_prefix, "__feature1_count")]]
+  guide_second = x$dracc[[paste0(x$guide_prefix, "__feature2_count")]]
+  larry_top = x$dracc[[paste0(x$larry_prefix, "__feature1_count")]]
+  larry_second = x$dracc[[paste0(x$larry_prefix, "__feature2_count")]]
+  dracc_gene_call = as.character(
+    x$dracc[[paste0(x$guide_prefix, "__feature_call")]]
+  )
+  dracc_larry_source = x$dracc[[
+    paste0(x$larry_prefix, "__feature_call")
+  ]]
+  dracc_larry_call = as.character(dracc_larry_source)
+  stopifnot(
+    !anyNA(guide_total),
+    !anyNA(guide_top),
+    !anyNA(guide_second),
+    !anyNA(larry_top),
+    !anyNA(larry_second),
+    !anyNA(dracc_gene_call),
+    !anyNA(dracc_larry_call),
+    is.factor(dracc_larry_source),
+    all(wt_larry_barcodes %in% levels(dracc_larry_source))
+  )
+
+  dracc_gene_type_1 = (
+    guide_top >= 5 & guide_second <= 0.5 * guide_top
+  )
+  dracc_gene_type_3 = guide_total > 0 & guide_top < 5
+  dracc_larry_type_1 = (
+    larry_top >= 5 & larry_second <= 0.5 * larry_top
+  )
+  stopifnot(
+    !any(dracc_gene_type_1 & dracc_gene_call == ""),
+    !any(dracc_larry_type_1 & dracc_larry_call == "")
+  )
+
+  dracc_larry_is_wt = dracc_larry_call %in% wt_larry_barcodes
+  dracc_is_ko = (
+    dracc_gene_type_1 &
+      dracc_larry_type_1 &
+      !dracc_larry_is_wt
+  )
+  dracc_is_wt = (
+    dracc_gene_type_3 &
+      dracc_larry_type_1 &
+      dracc_larry_is_wt
+  )
+
+  x$dracc$pass_feature_eligibility = (
+    x$dracc$pass_transcriptome_qc &
+      (dracc_is_ko | dracc_is_wt)
+  )
+  x$dracc$genotype_label = rep(NA_character_, nrow(x$dracc))
+  x$dracc$genotype_label[dracc_is_ko] = dracc_gene_call[dracc_is_ko]
+  x$dracc$genotype_label[dracc_is_wt] = "WT"
+  x$dracc$clone_id = dracc_larry_call
+
+  stopifnot(
+    any(x$msk$pass_transcriptome_qc & msk_is_wt),
+    any(x$dracc$pass_transcriptome_qc & dracc_is_wt),
+    !anyNA(
+      x$msk$genotype_label[x$msk$pass_feature_eligibility]
+    ),
+    !anyNA(x$msk$clone_id[x$msk$pass_feature_eligibility]),
+    !anyNA(
+      x$dracc$genotype_label[x$dracc$pass_feature_eligibility]
+    ),
+    !anyNA(x$dracc$clone_id[x$dracc$pass_feature_eligibility])
+  )
+  x
+})
+
+feature_eligibility_table = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    compare_sets(
+      x$stage,
+      x$msk$barcode[x$msk$pass_feature_eligibility],
+      as.character(
+        x$dracc$dracc_barcode[x$dracc$pass_feature_eligibility]
+      )
+    )
+  })
+)
+feature_eligibility_table = add_overall(feature_eligibility_table)
+
+write.csv(
+  feature_eligibility_table,
+  file.path(output_dir, "feature_eligible_cells.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  feature_eligibility_table,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 0, 2, 2),
+  col.names = c(
+    "Stage", "MSK", "DRACC", "Shared",
+    "Shared/MSK (%)", "Shared/DRACC (%)"
+  )
+)
+```
+
+### Final Feature-Identity Agreement
+
+Among cells retained by both workflows, downstream genotype labels are the
+target gene symbol for KO cells and `WT` for WT cells. MSK guide-number
+suffixes such as `.1` are removed. For WT clones, MSK's `WTBC..._` wrapper is
+removed so both workflows use the native `BC...` LARRY identifier; all clone
+IDs are then compared exactly.
+
+```{r feature-identity-agreement}
+feature_identity = do.call(
+  rbind,
+  lapply(stage_data, function(x) {
+    shared_cells = intersect(
+      x$msk$barcode[x$msk$pass_feature_eligibility],
+      as.character(
+        x$dracc$dracc_barcode[x$dracc$pass_feature_eligibility]
+      )
+    )
+    msk_index = match(shared_cells, x$msk$barcode)
+    dracc_index = match(shared_cells, x$dracc$dracc_barcode)
+
+    data.frame(
+      stage = x$stage,
+      barcode = shared_cells,
+      msk_genotype = x$msk$genotype_label[msk_index],
+      dracc_genotype = x$dracc$genotype_label[dracc_index],
+      msk_clone_id = x$msk$clone_id[msk_index],
+      dracc_clone_id = x$dracc$clone_id[dracc_index],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+stopifnot(!anyNA(feature_identity))
+
+# Summarize exact downstream identity agreement for one stage or all stages.
+summarize_feature_identity <- function(x, stage) {
+  n_cells = nrow(x)
+  data.frame(
+    stage = stage,
+    n_shared = n_cells,
+    genotype_matches = sum(x$msk_genotype == x$dracc_genotype),
+    genotype_agreement = ifelse(
+      n_cells > 0,
+      100 * mean(x$msk_genotype == x$dracc_genotype),
+      NA_real_
+    ),
+    clone_id_matches = sum(x$msk_clone_id == x$dracc_clone_id),
+    clone_id_agreement = ifelse(
+      n_cells > 0,
+      100 * mean(x$msk_clone_id == x$dracc_clone_id),
+      NA_real_
+    ),
+    stringsAsFactors = FALSE
+  )
+}
+
+feature_identity_table = do.call(
+  rbind,
+  c(
+    lapply(stage_map$stage, function(stage) {
+      summarize_feature_identity(
+        feature_identity[feature_identity$stage == stage, , drop = FALSE],
+        stage
+      )
+    }),
+    list(summarize_feature_identity(feature_identity, "All"))
+  )
+)
+
+write.csv(
+  feature_identity_table,
+  file.path(output_dir, "feature_identity_agreement.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  feature_identity_table,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 2, 0, 2),
+  col.names = c(
+    "Stage", "Shared retained", "Genotype matches",
+    "Genotype agreement (%)", "Clone-ID matches",
+    "Clone-ID agreement (%)"
+  )
+)
+```
+
+## Overall Summary
+
+This table reports the cumulative consequence of each cell-selection step.
+
+```{r overall-summary}
+summary_steps = list(
+  "Initial called cells" = initial_table,
+  "Singlets" = singlet_table,
+  "Transcriptome QC" = transcriptome_qc_table,
+  "geneBC/LARRY eligible" = feature_eligibility_table
+)
+
+overall_summary = do.call(
+  rbind,
+  lapply(names(summary_steps), function(step) {
+    x = summary_steps[[step]]
+    x = x[x$stage == "All", , drop = FALSE]
+
+    data.frame(
+      step = step,
+      n_msk = x$n_msk,
+      n_dracc = x$n_dracc,
+      n_shared = x$n_shared,
+      shared_over_msk = x$shared_over_msk,
+      shared_over_dracc = x$shared_over_dracc,
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+write.csv(
+  overall_summary,
+  file.path(output_dir, "overall_summary.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  overall_summary,
+  row.names = FALSE,
+  digits = c(NA, 0, 0, 0, 2, 2),
+  col.names = c(
+    "Step", "MSK", "DRACC", "Shared",
+    "Shared/MSK (%)", "Shared/DRACC (%)"
+  )
+)
+```

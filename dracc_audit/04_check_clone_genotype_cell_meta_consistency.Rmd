@@ -1,0 +1,108 @@
+---
+title: "04 Check Clone Genotype Cell Metadata Consistency"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(parallel)
+```
+
+## Check
+
+In v3, count metadata keeps barcodes with at least one RNA count, so feature
+h5ad barcodes do not need to be a subset of count metadata. The required check
+is narrower: count metadata cells with a nonempty clone or genotype annotation
+must exist in the corresponding feature h5ad and have the same decoded feature
+annotation.
+
+The feature h5ad `top_feature_name` is not the comparison value. Decode
+`top_feature_index` through `var$feature_name`.
+
+| source | barcode | value |
+|---|---|---|
+| count metadata clone ID | cell_A | BC201125 |
+| feature obs top_feature_index | cell_A | 201125 |
+| feature obs top_feature_name | cell_A | BC201126 |
+| feature var feature_name[201125] |  | BC201125 |
+
+```{r verify}
+cell_meta_dir = "/fh/fast/sun_w/yub/github/MSK_30polyKO/dracc_qc/outputs/01_extract_raw_count_cell_meta"
+
+dracc_dir = Sys.getenv("DRACC_PROCESSED_DIR")
+corrected_de_xm_dir = Sys.getenv("DRACC_DE_XM_DIR")
+
+stage_order = c("ES", "DE", "DE_XM", "PP1", "PP2", "S5_1", "S5_2", "S6_1", "S6_2")
+stage_suffix = c(
+  ES = "es",
+  DE = "de",
+  DE_XM = "de_gemx",
+  PP1 = "pp1",
+  PP2 = "pp2",
+  S5_1 = "s5_1",
+  S5_2 = "s5_2",
+  S6_1 = "s6_1",
+  S6_2 = "s6_2"
+)
+
+# Verify one metadata call column against one feature h5ad.
+check_feature_calls <- function(meta, feature_path, call_col) {
+  h5ad = anndata::read_h5ad(feature_path, backed = "r")
+  obs = as.data.frame(h5ad$obs, stringsAsFactors = FALSE)
+  feature_names = as.character(h5ad$var$feature_name)
+
+  stopifnot("top_feature_index" %in% colnames(obs))
+  stopifnot(!anyDuplicated(rownames(obs)))
+  stopifnot(!anyNA(meta[[call_col]]))
+
+  meta_call = as.character(meta[[call_col]])
+  called = meta_call != ""
+  feature_match = match(meta$dracc_barcode[called], rownames(obs))
+  stopifnot(!anyNA(feature_match))
+
+  feature_index = as.integer(as.character(obs$top_feature_index[feature_match]))
+  decoded_call = rep(NA_character_, length(feature_index))
+  valid_index = !is.na(feature_index) & feature_index > 0 & feature_index <= length(feature_names)
+  decoded_call[valid_index] = feature_names[feature_index[valid_index]]
+  stopifnot(!anyNA(decoded_call))
+  stopifnot(identical(meta_call[called], decoded_call))
+
+  TRUE
+}
+
+# Verify one stage.
+check_stage <- function(stage_id) {
+  stage_dir = if (stage_id == "DE_XM") {
+    corrected_de_xm_dir
+  } else {
+    file.path(dracc_dir, paste0("30_KO_", stage_id))
+  }
+
+  meta_path = file.path(cell_meta_dir, paste0(stage_id, ".rds"))
+  clone_col = paste0("Custom_larry_", stage_suffix[[stage_id]], "__feature_call")
+  genotype_col = paste0("CRISPR_Guide_Capture_grna_", stage_suffix[[stage_id]], "__feature_call")
+
+  stopifnot(file.exists(meta_path))
+  meta = readRDS(meta_path)
+  stopifnot(all(c("stage_id", "dracc_barcode", clone_col, genotype_col) %in% colnames(meta)))
+  stopifnot(all(meta$stage_id == stage_id), !anyNA(meta$dracc_barcode))
+
+  check_feature_calls(meta, file.path(stage_dir, "features", "larry", "features.h5ad"), clone_col)
+  check_feature_calls(meta, file.path(stage_dir, "features", "gene", "features.h5ad"), genotype_col)
+
+  TRUE
+}
+
+stage_checks = parallel::mclapply(
+  stage_order,
+  check_stage,
+  mc.cores = min(length(stage_order), parallel::detectCores())
+)
+
+failed = vapply(stage_checks, inherits, logical(1), "try-error")
+if (any(failed)) {
+  stop(stage_order[which(failed)[1]], ": ", stage_checks[[which(failed)[1]]])
+}
+
+stopifnot(all(unlist(stage_checks)))
+cat("All clone and genotype metadata calls are consistent with feature h5ad annotations.\n")
+```

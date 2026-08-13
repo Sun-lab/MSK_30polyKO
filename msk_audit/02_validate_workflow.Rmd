@@ -1,0 +1,372 @@
+---
+title: "MSK Workflow Validation"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This audit checks the supplied QC labels and reconstructs the final MSK cell
+set from the transcriptome-QC and barcode-assignment metadata.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+source_root = "/fh/fast/sun_w/yub/github/MSK_30polyKO/external_sources/msk/30KO_scRNAseq"
+tx_dir = file.path(source_root, "3.TX_QC")
+bc_dir = file.path(source_root, "2.demulti_BC")
+nan_final_path = file.path(source_root, "df.meta.rds")
+canonical_final_path = "/fh/fast/sun_w/yub/data/msk_30ko/raw/df.meta.rds"
+```
+
+## Inputs
+
+The validation reads Nan's supplied metadata directly and compares its final
+object with the canonical MSK metadata.
+
+```{r load-inputs}
+# 1. Load and check the supplied inputs
+tx_paths = sort(list.files(tx_dir, pattern = "rds$", full.names = TRUE))
+bc_paths = sort(list.files(bc_dir, pattern = "rds$", full.names = TRUE))
+
+stopifnot(
+  length(tx_paths) == 9L,
+  length(bc_paths) == 9L,
+  file.exists(nan_final_path),
+  file.exists(canonical_final_path)
+)
+
+nan_final = readRDS(nan_final_path)
+final_meta = readRDS(canonical_final_path)
+
+input_summary = data.frame(
+  input = c(
+    "Transcriptome-QC metadata files",
+    "Barcode-assignment metadata files",
+    "Nan final metadata cells",
+    "Canonical final metadata cells"
+  ),
+  value = c(
+    length(tx_paths),
+    length(bc_paths),
+    nrow(nan_final),
+    nrow(final_meta)
+  )
+)
+
+knitr::kable(input_summary, row.names = FALSE)
+
+final_objects_identical = identical(nan_final, final_meta)
+knitr::kable(
+  data.frame(
+    check = "Nan and canonical final R objects are identical",
+    passed = final_objects_identical
+  ),
+  row.names = FALSE
+)
+
+stopifnot(final_objects_identical)
+```
+
+## Transcriptome QC
+
+The expected labels are reconstructed from the four documented transcriptome
+cutoffs. Every supplied label and the combined `Qualified` value must agree.
+
+```{r validate-transcriptome-qc}
+# 2. Recalculate the documented transcriptome-QC labels
+tx_stages = sub(
+  ".seu.QC.metadata.rds",
+  "",
+  sub("df.", "", basename(tx_paths), fixed = TRUE),
+  fixed = TRUE
+)
+
+stopifnot(
+  !anyDuplicated(tx_stages),
+  !anyDuplicated(tx_paths)
+)
+
+tx_qc_results = lapply(seq_along(tx_paths), \(i) {
+  x = readRDS(tx_paths[[i]])
+
+  expected_qc1 = !is.na(x$nCount_RNA) & x$nCount_RNA >= 200
+  expected_qc2 = (
+    !is.na(x$scDblFinder.class) &
+      x$scDblFinder.class == "singlet"
+  )
+  expected_qc3 = !is.na(x$nFeature_RNA) & x$nFeature_RNA >= 100
+  expected_qc4 = !is.na(x$percent_mito) & x$percent_mito <= 20
+  expected_qualified = (
+    expected_qc1 &
+      expected_qc2 &
+      expected_qc3 &
+      expected_qc4
+  )
+
+  expected_qc1_label = ifelse(
+    expected_qc1,
+    "nCount_RNA>=200",
+    "nCount_RNA<200"
+  )
+  expected_qc2_label = ifelse(expected_qc2, "singlet", "doublet")
+  expected_qc3_label = ifelse(
+    expected_qc3,
+    "nFeature_RNA>=100",
+    "nFeature_RNA<100"
+  )
+  expected_qc4_label = ifelse(
+    expected_qc4,
+    "percent_mito<=20",
+    "percent_mito>20"
+  )
+
+  data.frame(
+    source_stage = tx_stages[[i]],
+    input_cells = nrow(x),
+    qualified_cells = sum(x$Qualified == "Yes", na.rm = TRUE),
+    qc1_mismatch = sum(
+      is.na(x$QC1_nCount_RNA) |
+        as.character(x$QC1_nCount_RNA) != expected_qc1_label
+    ),
+    qc2_mismatch = sum(
+      is.na(x$QC2_Doublets) |
+        as.character(x$QC2_Doublets) != expected_qc2_label
+    ),
+    qc3_mismatch = sum(
+      is.na(x$QC3_nFeature_RNA) |
+        as.character(x$QC3_nFeature_RNA) != expected_qc3_label
+    ),
+    qc4_mismatch = sum(
+      is.na(x$QC4_mito) |
+        as.character(x$QC4_mito) != expected_qc4_label
+    ),
+    qualified_mismatch = sum(
+      is.na(x$Qualified) |
+        (as.character(x$Qualified) == "Yes") != expected_qualified
+    )
+  )
+})
+
+tx_qc_results = do.call(rbind, tx_qc_results)
+knitr::kable(tx_qc_results, row.names = FALSE)
+
+stopifnot(
+  all(tx_qc_results$qc1_mismatch == 0L),
+  all(tx_qc_results$qc2_mismatch == 0L),
+  all(tx_qc_results$qc3_mismatch == 0L),
+  all(tx_qc_results$qc4_mismatch == 0L),
+  all(tx_qc_results$qualified_mismatch == 0L)
+)
+```
+
+## Barcode Categories
+
+The supplied tables do not contain the second-largest UMI, so the
+second/maximum ratio cannot be recalculated. The available top-UMI values are
+checked against the Type-1 minimum of five UMIs.
+
+```{r validate-barcode-categories}
+# 3. Check the recoverable part of the barcode category definitions
+bc_stages = sub(
+  ".rds",
+  "",
+  sub(
+    "df.all.larryBC.geneBC.",
+    "",
+    basename(bc_paths),
+    fixed = TRUE
+  ),
+  fixed = TRUE
+)
+
+stopifnot(
+  setequal(tx_stages, bc_stages),
+  !anyDuplicated(bc_stages),
+  !anyDuplicated(bc_paths)
+)
+
+type1 = "Type 1: Max >=5 & 2nd/Max <= 0.5"
+type3 = "Type 3: Max < 5"
+
+bc_category_results = lapply(seq_along(bc_paths), \(i) {
+  x = readRDS(bc_paths[[i]])
+  larry_umi = suppressWarnings(as.numeric(as.character(x$larryUMI)))
+  gene_umi = suppressWarnings(as.numeric(as.character(x$geneBCUMI)))
+  larry_type1 = x$larryBCCategory %in% type1
+  gene_type1 = x$geneBCCategory %in% type1
+
+  data.frame(
+    source_stage = bc_stages[[i]],
+    input_cells = nrow(x),
+    larry_type1_cells = sum(larry_type1),
+    larry_type1_umi_failure = sum(
+      larry_type1 & (is.na(larry_umi) | larry_umi < 5)
+    ),
+    gene_type1_cells = sum(gene_type1),
+    gene_type1_umi_failure = sum(
+      gene_type1 & (is.na(gene_umi) | gene_umi < 5)
+    )
+  )
+})
+
+bc_category_results = do.call(rbind, bc_category_results)
+knitr::kable(bc_category_results, row.names = FALSE)
+
+stopifnot(
+  all(bc_category_results$larry_type1_umi_failure == 0L),
+  all(bc_category_results$gene_type1_umi_failure == 0L)
+)
+```
+
+## Final Cell Set
+
+The final selection is reconstructed by joining each stage on its 10x cell
+barcode, applying transcriptome QC, and retaining a Type-1 geneBC cell or the
+reconstructed WT fallback.
+
+```{r reconstruct-final-cells}
+# 4. Reconstruct and compare every sample-specific final barcode set
+final_stage = c(
+  DE_NZ = "DE_GemX",
+  DE_XM = "DE",
+  ES = "ES",
+  PP1 = "PP1",
+  PP2 = "PP2",
+  S5_1 = "S5_1",
+  S5_2 = "S5_2",
+  S6_1 = "S6_1",
+  S6_2 = "S6_2"
+)
+
+stage_validation = lapply(names(final_stage), \(source_stage) {
+  tx_path = tx_paths[tx_stages == source_stage]
+  bc_path = bc_paths[bc_stages == source_stage]
+
+  stopifnot(length(tx_path) == 1L, length(bc_path) == 1L)
+
+  tx = readRDS(tx_path)
+  bc = readRDS(bc_path)
+
+  stopifnot(
+    !anyDuplicated(rownames(tx)),
+    !anyDuplicated(bc$cellid)
+  )
+
+  common_cellids = intersect(rownames(tx), as.character(bc$cellid))
+  tx_common = tx[
+    match(common_cellids, rownames(tx)),
+    ,
+    drop = FALSE
+  ]
+  bc_common = bc[
+    match(common_cellids, as.character(bc$cellid)),
+    ,
+    drop = FALSE
+  ]
+
+  stopifnot(
+    identical(common_cellids, rownames(tx_common)),
+    identical(common_cellids, as.character(bc_common$cellid))
+  )
+
+  has_larry_category = (
+    !is.na(bc_common$larryBCCategory) &
+      bc_common$larryBCCategory != "NA"
+  )
+  has_gene_category = (
+    !is.na(bc_common$geneBCCategory) &
+      bc_common$geneBCCategory != "NA"
+  )
+  is_ko = bc_common$geneBCCategory == type1
+  is_wt = (
+    bc_common$geneBCCategory == type3 &
+      bc_common$larryBCCategory == type1 &
+      bc_common$larryBC_type == "WT"
+  )
+  keep = (
+    tx_common$Qualified == "Yes" &
+      has_larry_category &
+      has_gene_category &
+      (is_ko | is_wt)
+  )
+
+  reconstructed_ids = paste0(
+    sub("-1$", "", common_cellids[keep]),
+    "-",
+    final_stage[[source_stage]]
+  )
+  reconstructed_group = ifelse(
+    is_ko[keep],
+    "KO_cells",
+    "WT_cells"
+  )
+
+  observed_ids = rownames(final_meta)[
+    final_meta$orig.ident == final_stage[[source_stage]]
+  ]
+  final_index = match(reconstructed_ids, rownames(final_meta))
+
+  summary = data.frame(
+    source_stage = source_stage,
+    final_label = final_stage[[source_stage]],
+    tx_cells = nrow(tx),
+    tx_qualified = sum(tx$Qualified == "Yes", na.rm = TRUE),
+    bc_cells = nrow(bc),
+    joined_cells = length(common_cellids),
+    reconstructed = length(reconstructed_ids),
+    observed = length(observed_ids),
+    reconstructed_only = length(
+      setdiff(reconstructed_ids, observed_ids)
+    ),
+    observed_only = length(setdiff(observed_ids, reconstructed_ids)),
+    group_mismatch = sum(
+      is.na(final_index) |
+        final_meta$group[final_index] != reconstructed_group
+    ),
+    exact_match = setequal(reconstructed_ids, observed_ids)
+  )
+
+  list(summary = summary, ids = reconstructed_ids)
+})
+
+validation_summary = do.call(
+  rbind,
+  lapply(stage_validation, \(x) x$summary)
+)
+reconstructed_ids = unname(
+  unlist(lapply(stage_validation, \(x) x$ids))
+)
+combined_exact_match = (
+  !anyDuplicated(reconstructed_ids) &&
+    setequal(reconstructed_ids, rownames(final_meta))
+)
+
+knitr::kable(validation_summary, row.names = FALSE)
+knitr::kable(
+  data.frame(
+    check = "Combined reconstructed and final barcode sets are identical",
+    reconstructed_cells = length(reconstructed_ids),
+    observed_cells = nrow(final_meta),
+    passed = combined_exact_match
+  ),
+  row.names = FALSE
+)
+
+stopifnot(
+  all(validation_summary$reconstructed_only == 0L),
+  all(validation_summary$observed_only == 0L),
+  all(validation_summary$group_mismatch == 0L),
+  all(validation_summary$exact_match),
+  combined_exact_match
+)
+```
+
+All available checks pass: the documented transcriptome-QC labels are
+internally consistent, the recoverable Type-1 UMI thresholds hold, and the
+reconstructed final set matches all `r format(nrow(final_meta), big.mark = ",")`
+canonical MSK cells exactly.

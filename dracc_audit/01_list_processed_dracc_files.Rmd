@@ -1,0 +1,35 @@
+---
+title: "DRACC Processed Files"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(knitr)
+
+dracc_dir = "/fh/fast/sun_w/MorPhiC/data/MorPhiC_internal_releases/MorPhiC_Release_June_2026/MSK_30polyKO_revised_DRACC_processed_v3/processed"
+corrected_de_xm_dir = "/fh/fast/sun_w/MorPhiC/data/Hong_shared_globus_20260706/MSK_30KO_DE_XM_corrected_2026-07-06_preRelease"
+```
+
+## Inputs
+
+List the processed DRACC files, using the corrected DE_XM directory in place
+of the DE_XM directory in the main release.
+
+```{r list-files}
+stopifnot(dir.exists(dracc_dir), dir.exists(corrected_de_xm_dir))
+
+dracc_files = sort(list.files(dracc_dir, recursive = TRUE, full.names = FALSE))
+dracc_files = dracc_files[!startsWith(dracc_files, "30_KO_DE_XM/")]
+corrected_de_xm_files = sort(list.files(
+  corrected_de_xm_dir,
+  recursive = TRUE,
+  full.names = FALSE
+))
+
+processed_files = rbind(
+  data.frame(source = "dracc_dir", path = dracc_files),
+  data.frame(source = "corrected_de_xm_dir", path = corrected_de_xm_files)
+)
+
+kable(processed_files, row.names = FALSE)
+```

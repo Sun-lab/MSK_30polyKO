@@ -1,0 +1,114 @@
+---
+title: "MSK EDA"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(Seurat)
+library(ggplot2)
+library(knitr)
+
+seurat_path = "/fh/fast/sun_w/yub/data/msk_30ko/raw/all.seu.merged.integrated.rds"
+meta_path = "/fh/fast/sun_w/yub/data/msk_30ko/raw/df.meta.rds"
+```
+
+## Inputs
+
+This report inspects the MSK reference Seurat object and metadata used for DRACC label transfer.
+
+```{r load-data}
+obj = readRDS(seurat_path)
+meta = as.data.frame(readRDS(meta_path), stringsAsFactors = FALSE)
+
+stopifnot(all(c("cellid", "subcelltype") %in% names(meta)))
+
+kable(data.frame(
+  object_cells = ncol(obj),
+  object_features = nrow(obj),
+  metadata_rows = nrow(meta),
+  metadata_columns = ncol(meta)
+))
+```
+
+## Metadata Summary
+
+The key metadata fields are summarized in the report without writing a separate output file.
+
+```{r metadata-summary}
+# Keep the original report's exact fields and fail if the metadata schema changes.
+metadata_cols = c(
+  "cellid", "subcelltype", "nCount_RNA", "nFeature_RNA", "percent_mito",
+  "percent_ribo", "nCount_decontXcounts", "nFeature_decontXcounts",
+  "QC1_nCount_RNA", "QC2_Doublets", "QC3_nFeature_RNA", "QC4_mito",
+  "celltype_20250623", "stage"
+)
+stopifnot(all(metadata_cols %in% names(meta)))
+
+metadata_summary = do.call(rbind, lapply(metadata_cols, \(column) {
+  x = meta[[column]]
+  if (is.numeric(x)) {
+    return(data.frame(
+      column = column,
+      n_missing = sum(is.na(x)),
+      n_unique = length(unique(x[!is.na(x)])),
+      min = min(x, na.rm = TRUE),
+      median = median(x, na.rm = TRUE),
+      max = max(x, na.rm = TRUE),
+      top_value = NA_character_,
+      top_n = NA_integer_
+    ))
+  }
+
+  counts = sort(table(x, useNA = "no"), decreasing = TRUE)
+  data.frame(
+    column = column,
+    n_missing = sum(is.na(x)),
+    n_unique = length(counts),
+    min = NA_real_,
+    median = NA_real_,
+    max = NA_real_,
+    top_value = if (length(counts)) names(counts)[[1]] else NA_character_,
+    top_n = if (length(counts)) as.integer(counts[[1]]) else NA_integer_
+  )
+}))
+row.names(metadata_summary) = NULL
+
+kable(metadata_summary)
+```
+
+## Subcelltype UMAP
+
+```{r subcelltype-umap, fig.width=9, fig.height=7}
+cell_idx = match(colnames(obj), meta$cellid)
+if (anyNA(cell_idx)) {
+  stop("MSK metadata is missing ", sum(is.na(cell_idx)), " Seurat object cells.")
+}
+obj$subcelltype = meta$subcelltype[cell_idx]
+
+reduction_candidates = c("umap.integrated", "umap.unintegrated", "umap", "integrated.umap", "wnn.umap")
+reduction_name = reduction_candidates[reduction_candidates %in% Reductions(obj)][1]
+if (is.na(reduction_name)) {
+  stop("No UMAP reduction found. Available reductions: ", paste(Reductions(obj), collapse = ", "))
+}
+
+umap = as.data.frame(Embeddings(obj, reduction = reduction_name)[, 1:2])
+names(umap) = c("umap_1", "umap_2")
+umap$subcelltype = factor(obj$subcelltype)
+
+subcelltype_levels = levels(umap$subcelltype)
+subcelltype_cols = hcl.colors(length(subcelltype_levels), palette = "Dark 3")
+names(subcelltype_cols) = subcelltype_levels
+
+umap_plot = ggplot(umap, aes(x = umap_1, y = umap_2, color = subcelltype)) +
+  geom_point(size = 0.22, alpha = 0.9, stroke = 0) +
+  scale_color_manual(values = subcelltype_cols) +
+  coord_equal() +
+  labs(x = "UMAP 1", y = "UMAP 2", color = NULL) +
+  theme_classic(base_size = 11) +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1)))
+
+umap_plot
+```

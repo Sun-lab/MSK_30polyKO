@@ -1,0 +1,66 @@
+---
+title: "03 Inspect Gene Feature H5AD"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, message=FALSE}
+library(anndata)
+```
+
+```{r paths}
+dracc_dir = Sys.getenv("DRACC_PROCESSED_DIR")
+corrected_de_xm_dir = Sys.getenv("DRACC_DE_XM_DIR")
+stage_order = c("ES", "DE", "DE_XM", "PP1", "PP2", "S5_1", "S5_2", "S6_1", "S6_2")
+
+feature_paths = setNames(
+  ifelse(
+    stage_order == "DE_XM",
+    file.path(corrected_de_xm_dir, "features", "gene", "features.h5ad"),
+    file.path(dracc_dir, paste0("30_KO_", stage_order), "features", "gene", "features.h5ad")
+  ),
+  stage_order
+)
+
+missing_paths = feature_paths[!file.exists(feature_paths)]
+if (length(missing_paths) > 0) {
+  stop("Missing gene feature files:\n", paste(missing_paths, collapse = "\n"))
+}
+```
+
+## Read Gene H5AD Files
+
+Read one `features/gene/features.h5ad` per stage and keep the AnnData objects
+as a named list.
+
+```{r read-h5ad}
+gene_features = lapply(feature_paths, \(path) anndata::read_h5ad(path, backed = "r"))
+```
+
+## AnnData Objects
+
+Print each stage-level AnnData object.
+
+```{r print-h5ad}
+for (stage_id in names(gene_features)) {
+  cat("\n\n", stage_id, "\n", sep = "")
+  print(gene_features[[stage_id]])
+}
+```
+
+## `obs` And `var` Heads
+
+Print the first two rows of `obs` and `var` for each stage.
+
+```{r print-heads, results='asis'}
+for (stage_id in names(gene_features)) {
+  cat("\n\n### ", stage_id, " obs\n\n", sep = "")
+  print(knitr::kable(head(as.data.frame(gene_features[[stage_id]]$obs, stringsAsFactors = FALSE), 2L)))
+
+  cat("\n\n### ", stage_id, " var\n\n", sep = "")
+  print(knitr::kable(head(as.data.frame(gene_features[[stage_id]]$var, stringsAsFactors = FALSE), 2L)))
+}
+```
