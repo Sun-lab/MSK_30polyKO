@@ -10,7 +10,7 @@ and DRACC cell type while accounting for LARRY clone structure.
   S5 = S5_1 + S5_2, and S6 = S6_1 + S6_2. It excludes unassigned cells and
   requires at least 30 KO and 30 WT cells per stage-group, cell-type contrast.
   NEBULA negative-binomial gamma mixed models use LARRY clone as the subject,
-  total RNA count as the offset, and a sample covariate for S1, S5, and S6;
+  total RNA count as the offset, and a sample covariate for S1 only;
   p-values are Bonferroni-adjusted across genes within each contrast.
 - [`02_collect_significant_differential_expression.R`](02_collect_significant_differential_expression.R)
   collects converged results with Bonferroni-adjusted p-values below 0.05.
@@ -21,7 +21,7 @@ and DRACC cell type while accounting for LARRY clone structure.
 
 - The eligibility rule produces 311 KO-versus-WT contrasts across S0, S1, S3,
   S4, S5, and S6.
-- The compact table contains 94,322 significant, converged gene-level results.
+- The compact table contains 94,353 significant, converged gene-level results.
 
 ## Scope and Data Availability
 

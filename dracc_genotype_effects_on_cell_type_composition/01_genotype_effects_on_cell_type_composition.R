@@ -9,7 +9,12 @@ annotation_path = "/fh/fast/sun_w/yub/github/MSK_30polyKO/dracc_cell_type_labeli
 output_dir = "/fh/fast/sun_w/yub/github/MSK_30polyKO/dracc_genotype_effects_on_cell_type_composition/outputs/01_genotype_effects_on_cell_type_composition"
 model_dir = file.path(output_dir, "models")
 
-samples_to_run = c("PP1", "PP2", "S5_1", "S5_2", "S6_1", "S6_2")
+samples_to_run = list(
+  PP1 = "PP1",
+  PP2 = "PP2",
+  S5 = c("S5_1", "S5_2"),
+  S6 = c("S6_1", "S6_2")
+)
 min_cell_type_cells = 200L
 
 # 1. Join the final cell-type annotations to the QC metadata
@@ -49,17 +54,18 @@ stopifnot(
   all(nzchar(analysis_meta$genotype)),
   all(nzchar(analysis_meta$clone_id)),
   "WT" %in% analysis_meta$genotype,
-  all(samples_to_run %in% analysis_meta$sample_id)
+  all(unlist(samples_to_run, use.names = FALSE) %in% analysis_meta$sample_id)
 )
 
-# 2. Test genotype effects within each sample and cell type
+# 2. Test genotype effects within each sample group and cell type
 dir.create(model_dir, recursive = TRUE, showWarnings = FALSE)
 result_list = list()
 result_index = 1L
 
-for (sample_id in samples_to_run) {
+for (sample_id in names(samples_to_run)) {
+  sample_ids = samples_to_run[[sample_id]]
   sample_meta = analysis_meta[
-    analysis_meta$sample_id == sample_id,
+    analysis_meta$sample_id %in% sample_ids,
     ,
     drop = FALSE
   ]

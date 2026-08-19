@@ -96,7 +96,8 @@ for (stage_name in stages_to_run) {
         levels = c("WT", genotype)
       )
       predictor_cols = "geneBC_type"
-      use_sample_covariate = length(sample_ids) > 1L
+      # Only S1 adjusts for sample; S5 and S6 are pooled without this term.
+      use_sample_covariate = stage_name == "S1"
       if (use_sample_covariate) {
         obj_sub$stage_id = factor(obj_sub$stage_id)
         predictor_cols = c("stage_id", predictor_cols)

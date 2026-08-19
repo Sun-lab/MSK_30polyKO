@@ -42,10 +42,10 @@ consistency and cell-labeling steps.
   113,891 direct labels, 7,178 kNN labels, and 375 unassigned cells; accepted
   holdout predictions are 99.53% accurate.
 - [Composition results](dracc_genotype_effects_on_cell_type_composition/outputs/01_genotype_effects_on_cell_type_composition/genotype_effects_on_cell_type_composition.csv):
-  960 KO-versus-WT contrasts, including 224 with Dunnett-adjusted p-values
+  630 KO-versus-WT contrasts, including 178 with Dunnett-adjusted p-values
   below 0.05.
 - [Differential-expression results](dracc_gene_ko_differential_expression_by_cell_type/outputs/02_collect_significant_differential_expression.csv):
-  94,322 converged, Bonferroni-significant gene-level results from 311 eligible
+  94,353 converged, Bonferroni-significant gene-level results from 311 eligible
   contrasts.
 
 ## Scope and Data Availability
